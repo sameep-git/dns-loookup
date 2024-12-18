@@ -3,6 +3,8 @@
 #include <vector>
 #include <cstring>
 #include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 struct DNSHeader {
     /** identifier */
@@ -37,7 +39,6 @@ std::vector<uint8_t> encodeDomainName(const std::string& domain) {
 
 std::vector<uint8_t> createQuestion(const std::string& domain) {
     std::vector<uint8_t> question = encodeDomainName(domain);
-
     // append the query type (ex: here A = 0x0001)
     question.push_back(0x00);
     question.push_back(0x01);
@@ -67,16 +68,145 @@ std::vector<uint8_t> createDNSQuery(const std::string& domain) {
     return query;
 }
 
-int main() {
-    // we want to create a DNS Query using the protocol described by IETF
-    std::vector<uint8_t> query = createDNSQuery("sameepshah.com");
+int parseResponse(const uint8_t *response) {
+    size_t offset = 0;
+
+    uint16_t idHex = (response[offset] << 8) | response[offset + 1]; offset += 2;
+    uint16_t flags = (response[offset] << 8) | response[offset + 1]; offset += 2;
+    uint16_t qdCount = (response[offset] << 8) | response[offset + 1]; offset += 2;
+    uint16_t anCount = (response[offset] << 8) | response[offset + 1]; offset += 2;
+    uint16_t nsCount = (response[offset] << 8) | response[offset + 1]; offset += 2;
+    uint16_t arCount = (response[offset] << 8) | response[offset + 1]; offset += 2;
+
+    // Getting the value of ID in ascii
+    char id[10];
+    snprintf(id, sizeof(id), "%x", idHex);
+
+    // We are getting the value of opcode here
+    std::string opcode;
+    uint8_t opcodeHex = (flags >> 11) & 0x3;
+    if (opcodeHex == 0x0) {
+        opcode = "QUERY";
+    } else if (opcodeHex == 0x1) {
+        opcode = "IQUERY";
+    } else if (opcodeHex == 0x2) {
+        opcode = "STATUS";
+    }
+
+    std::string status;
+    uint8_t statusHex = (flags & 0xF);
+    switch (statusHex){
+        case 0x0:
+            status = "NOERROR";
+            break;
+        case 0x1:
+            status = "FORMERR";
+            break;
+        case 0x2:
+            status = "SERVFAIL";
+            break;
+        case 0x3:
+            status = "NXDOMAIN";
+            break;
+        case 0x4:
+            status = "NOTIMP";
+            break;
+        case 0x5:
+            status = "REFUSED";
+            break;
+        case 0x6:
+            status = "YXDOMAIN";
+            break;
+        case 0x7:
+            status = "XRRSET";
+            break;
+        case 0x8:
+            status = "NOTAUTH";
+            break;
+        case 0x9:
+            status = "NOTZONE";
+            break;
+    }
+
+    std::string flagStr;
+    if ((flags >> 15) & 0x1) {
+        flagStr.append("qr ");
+    }
+    if ((flags >> 10) & 0x1) {
+        flagStr.append("aa ");
+    }
+    if ((flags >> 9) & 0x1) {
+        flagStr.append("tc ");
+    }
+    if ((flags >> 8) & 0x1) {
+        flagStr.append("rd ");
+    }
+    if ((flags >> 7) & 0x1) {
+        flagStr.append("ra ");
+    }
+    if (flagStr.length() == 0) {
+        flagStr = "none";
+    } else {
+        flagStr.erase(flagStr.length()-1);
+    }
+    std::cout << "Header:\n";
+    std::cout << "  opcode: " << opcode << ", status: " << status << ", id: " << id << "\n";
+    std::cout << "  flags: " << flagStr << "; QUERY: " << qdCount <<", ANSWER: " << anCount;
+    std::cout << ", AUTHORITY: " << nsCount << ", ADDITIONAL: " << arCount << "\n";
+    return 0;
+}
+
+int sendQuery(const std::vector<uint8_t>& query) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("Socket creation failed.");
+        return -1;
+    }
+
+    sockaddr_in server;
+    server.sin_family = AF_INET;
+    server.sin_port = htons(53);
+    inet_pton(AF_INET, "127.0.2.2", &server.sin_addr);
+    socklen_t serverLen = sizeof(server);
+
+    if(sendto(sock, query.data(), query.size(), 0, (struct sockaddr*)&server, sizeof(server)) < 0) {
+        perror("Send error.");
+        close(sock);
+        return -1;
+    }
+
+    uint8_t buffer[512];
     
-    // Just printing the query for review
-    std::cout << "DNS Query (Hex): ";
-    for(uint8_t byte: query) {
+    int recvLen = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr*)&server, &serverLen);
+    if(recvLen < 0) {
+        perror("Receive failed.");
+        close(sock);
+        return -1;
+    }
+
+    std::cout<<"Response:   ";
+    for(uint8_t byte: buffer) {
         printf("%02x ", byte);
     }
     std::cout<<std::endl;
 
+    std::cout<<"Response received, of length: "<<recvLen<<std::endl;
+    close(sock);
+    parseResponse(buffer);
+    return 0;
+}
+
+int main() {
+    // we want to create a DNS Query using the protocol described by IETF
+    std::vector<uint8_t> query = createDNSQuery("sameepshah.com");
+
+    // Just printing the query for review
+    // std::cout << "Query:    ";
+    // for(uint8_t byte: query) {
+    //     printf("%02x ", byte);
+    // }
+    // std::cout<<std::endl;
+
+    sendQuery(query);
     return 0;
 }
